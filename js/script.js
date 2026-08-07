@@ -414,17 +414,18 @@
 
   // ---------- render (per frame) ----------
   // open cards push everything older (rendered below them) further down —
-  // measure their live (possibly still-animating) height once per frame,
-  // then look up cumulative push per day index without re-reading layout.
+  // measure each panel's live (possibly still-animating) height every frame
+  // rather than gating on openIds, so closing shrinks the push back down in
+  // sync with the fold-in transition instead of snapping it to 0 instantly.
   function measureOpenPushes() {
     const pushes = [];
     eventEls.forEach((el, id) => {
-      if (!openIds.has(id)) return;
       const ev = events.find(e => e.id === id);
       if (!ev) return;
       const panel = el.querySelector(".event-card__panel");
       if (!panel) return;
-      pushes.push({ dayIdx: dayIndexOf(new Date(ev.date + "T00:00:00")), height: panel.getBoundingClientRect().height });
+      const height = panel.getBoundingClientRect().height;
+      if (height > 0.5) pushes.push({ dayIdx: dayIndexOf(new Date(ev.date + "T00:00:00")), height });
     });
     return pushes;
   }

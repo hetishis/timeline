@@ -309,40 +309,46 @@ body {
   left: 0; right: 0; bottom: 0;
   z-index: 55;
   height: var(--bar-h);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 18px;
   background: rgba(250, 248, 244, 0.92);
   backdrop-filter: blur(10px);
   border-top: 1px solid var(--card-border);
 }
+/* date is centered independently via absolute positioning (not flex/gap
+   alongside the fab) so its own text width never nudges the fab's spot */
 .date-bar__date {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
   font-size: 0.95rem;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   color: var(--text);
   text-align: center;
+  white-space: nowrap;
 }
 .add-fab {
+  position: absolute;
+  right: 18px;
+  top: 50%;
+  transform: translateY(-50%);
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  width: 44px;
+  height: 44px;
   font: inherit;
   font-weight: 700;
-  font-size: 0.85rem;
+  font-size: 1.3rem;
+  line-height: 1;
   color: var(--bg-elevated);
   background: var(--text);
   border: none;
-  min-height: 44px;
-  padding: 9px 18px 9px 14px;
-  border-radius: 999px;
+  border-radius: 50%;
   cursor: pointer;
   transition: background 0.15s ease, transform 0.15s ease;
 }
-.add-fab:hover { background: #000; transform: translateY(-1px); }
-.add-fab__icon { font-size: 1.05rem; line-height: 1; }
+.add-fab:hover { background: #000; transform: translateY(calc(-50% - 1px)); }
 
 /* ---------- Add panel (slide-up sheet) ---------- */
 .add-panel {
