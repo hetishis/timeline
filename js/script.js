@@ -273,7 +273,7 @@
     openIds.add(id);
     const el = eventEls.get(id);
     if (el) el.querySelector(".event-card").classList.add("open");
-    render();
+    animateSettle();
   }
   function updateEvent(id, data) {
     const idx2 = events.findIndex(e => e.id === id);
@@ -286,7 +286,7 @@
     rebuildEvents();
     const el = eventEls.get(id);
     if (el) el.querySelector(".event-card").classList.add("open");
-    render();
+    animateSettle();
   }
   function deleteEvent(id) {
     events = events.filter(e => e.id !== id);
@@ -303,6 +303,7 @@
     const card = el.querySelector(".event-card");
     const isOpen = card.classList.toggle("open");
     if (isOpen) openIds.add(id); else openIds.delete(id);
+    animateSettle();
   }
   function enterEdit(id) {
     const ev = events.find(e => e.id === id);
@@ -312,6 +313,7 @@
     el.querySelector(".event-card__panel-inner").innerHTML = eventEditBody(ev);
     el.querySelector(".event-card").classList.add("open");
     openIds.add(id);
+    animateSettle();
   }
   function exitEdit(id) {
     const ev = events.find(e => e.id === id);
@@ -320,6 +322,7 @@
     const el = eventEls.get(id);
     if (!el) return;
     el.querySelector(".event-card__panel-inner").innerHTML = eventViewBody(ev, cat);
+    animateSettle();
   }
   function handleDeleteClick(id, btn) {
     if (btn.dataset.armed === "1") { deleteEvent(id); return; }
@@ -410,11 +413,34 @@
   }
 
   // ---------- render (per frame) ----------
+  // open cards push everything older (rendered below them) further down —
+  // measure their live (possibly still-animating) height once per frame,
+  // then look up cumulative push per day index without re-reading layout.
+  function measureOpenPushes() {
+    const pushes = [];
+    eventEls.forEach((el, id) => {
+      if (!openIds.has(id)) return;
+      const ev = events.find(e => e.id === id);
+      if (!ev) return;
+      const panel = el.querySelector(".event-card__panel");
+      if (!panel) return;
+      pushes.push({ dayIdx: dayIndexOf(new Date(ev.date + "T00:00:00")), height: panel.getBoundingClientRect().height });
+    });
+    return pushes;
+  }
+  function pushFor(openPushes, dayIdx) {
+    let total = 0;
+    for (const o of openPushes) if (o.dayIdx > dayIdx) total += o.height;
+    return total;
+  }
+
   function render() {
+    const openPushes = measureOpenPushes();
+
     dayNodes.forEach(node => {
       const el = dayEls.get(node.dayIdx);
       if (!el) return;
-      const y = playheadY + (cursorIdx - node.dayIdx) * PX_PER_DAY;
+      const y = playheadY + (cursorIdx - node.dayIdx) * PX_PER_DAY + pushFor(openPushes, node.dayIdx);
       el.style.transform = `translate(-50%, ${y.toFixed(1)}px)`;
     });
 
@@ -422,7 +448,7 @@
       const ev = events.find(e => e.id === id);
       if (!ev) return;
       const idx = dayIndexOf(new Date(ev.date + "T00:00:00"));
-      const y = playheadY + (cursorIdx - idx) * PX_PER_DAY;
+      const y = playheadY + (cursorIdx - idx) * PX_PER_DAY + pushFor(openPushes, idx);
       el.style.transform = `translate(-50%, ${y.toFixed(1)}px)`;
       const dist = Math.abs(y - playheadY);
       const fade = clamp(1 - dist / (stageH * 1.1), 0.4, 1);
@@ -437,6 +463,17 @@
     progressFillEl.style.width = pct + "%";
   }
 
+  // keep re-rendering for a short window so the push-down amount tracks the
+  // fold-out's CSS height transition smoothly instead of jumping instantly
+  function animateSettle(durationMs = 400) {
+    const start = performance.now();
+    function tick(now) {
+      render();
+      if (now - start < durationMs) requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }
+
   // ---------- input: wheel / touch / keyboard ----------
   function normalizeDeltaY(e) {
     let d = e.deltaY;
@@ -448,26 +485,82 @@
   function applyDelta(deltaPx) {
     const daysDelta = deltaPx / PX_PER_DAY;
     // scrolling down (positive delta) moves toward the past (smaller day index)
+    const before = cursorIdx;
     cursorIdx = clamp(cursorIdx - daysDelta, range.minIdx, range.maxIdx);
     render();
+    return cursorIdx !== before;
   }
 
+  // ---------- momentum: continue coasting after release, based on release
+  // speed only — this never touches PX_PER_DAY, just how far cursorIdx
+  // keeps moving on its own before friction brings it to a stop.
+  const MOMENTUM_MIN_VELOCITY = 0.02; // px/ms
+  const MOMENTUM_FRICTION = 0.94; // per ~16ms frame
+  let velocity = 0; // px/ms, same sign convention as deltaPx
+  let momentumRAF = null;
+
+  function stopMomentum() {
+    if (momentumRAF) { cancelAnimationFrame(momentumRAF); momentumRAF = null; }
+  }
+  function startMomentum() {
+    stopMomentum();
+    if (Math.abs(velocity) < MOMENTUM_MIN_VELOCITY) return;
+    let last = performance.now();
+    function tick(now) {
+      const dt = Math.max(1, now - last);
+      last = now;
+      const moved = applyDelta(velocity * dt);
+      velocity *= Math.pow(MOMENTUM_FRICTION, dt / 16);
+      if (!moved || Math.abs(velocity) < MOMENTUM_MIN_VELOCITY) { velocity = 0; momentumRAF = null; return; }
+      momentumRAF = requestAnimationFrame(tick);
+    }
+    momentumRAF = requestAnimationFrame(tick);
+  }
+  function recordVelocity(deltaPx, dtMs) {
+    const dt = Math.max(1, dtMs);
+    if (dt > 200) velocity = 0; // gap too long to be a continuous gesture — don't inherit stale speed
+    velocity = velocity * 0.6 + (deltaPx / dt) * 0.4;
+  }
+
+  let lastWheelTime = 0;
+  let wheelReleaseTimer = null;
   stageEl.addEventListener("wheel", e => {
     e.preventDefault();
-    applyDelta(normalizeDeltaY(e));
+    stopMomentum();
+    const now = performance.now();
+    const dt = now - (lastWheelTime || now - 16);
+    lastWheelTime = now;
+    const d = normalizeDeltaY(e);
+    applyDelta(d);
+    recordVelocity(d, dt);
+    clearTimeout(wheelReleaseTimer);
+    wheelReleaseTimer = setTimeout(startMomentum, 90);
   }, { passive: false });
 
   let touchLastY = null;
+  let touchLastTime = 0;
   stageEl.addEventListener("touchstart", e => {
+    stopMomentum();
+    velocity = 0;
     touchLastY = e.touches[0].clientY;
+    touchLastTime = performance.now();
   }, { passive: true });
   stageEl.addEventListener("touchmove", e => {
     e.preventDefault();
     const y = e.touches[0].clientY;
-    if (touchLastY !== null) applyDelta(touchLastY - y);
+    const now = performance.now();
+    if (touchLastY !== null) {
+      const delta = touchLastY - y;
+      applyDelta(delta);
+      recordVelocity(delta, now - touchLastTime);
+    }
     touchLastY = y;
+    touchLastTime = now;
   }, { passive: false });
-  stageEl.addEventListener("touchend", () => { touchLastY = null; });
+  stageEl.addEventListener("touchend", () => {
+    touchLastY = null;
+    startMomentum();
+  });
 
   stageEl.addEventListener("keydown", e => {
     let days = 0;
@@ -475,10 +568,11 @@
     else if (e.key === "ArrowUp") days = 1;
     else if (e.key === "PageDown") days = -30;
     else if (e.key === "PageUp") days = 30;
-    else if (e.key === "Home") { cursorIdx = range.maxIdx; render(); e.preventDefault(); return; }
-    else if (e.key === "End") { cursorIdx = range.minIdx; render(); e.preventDefault(); return; }
+    else if (e.key === "Home") { stopMomentum(); cursorIdx = range.maxIdx; render(); e.preventDefault(); return; }
+    else if (e.key === "End") { stopMomentum(); cursorIdx = range.minIdx; render(); e.preventDefault(); return; }
     if (days !== 0) {
       e.preventDefault();
+      stopMomentum();
       cursorIdx = clamp(cursorIdx + days, range.minIdx, range.maxIdx);
       render();
     }
