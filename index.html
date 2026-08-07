@@ -10,27 +10,34 @@
 <body>
 
   <header class="site-header">
-    <div class="site-header__inner">
+    <div class="site-header__row">
       <span class="site-header__title">🗓️ My Life Timeline</span>
-      <span class="site-header__hint">today at the top &middot; click an entry to expand &middot; add your own below</span>
+      <span class="site-header__hint">scroll slowly for days, fast for years</span>
     </div>
+    <div class="legend" id="legend"></div>
     <div class="progress-bar"><div class="progress-bar__fill" id="progressFill"></div></div>
   </header>
 
-  <main>
-    <section class="intro">
-      <h1>Working backward from today.</h1>
-      <p>Every month since January 2023, newest first. Click any entry to read more, edit it, or remove it &mdash; and drop in moments of your own as you go.</p>
-    </section>
+  <div class="stage" id="stage" tabindex="0" aria-label="Life timeline, scroll or use arrow keys to move through time">
+    <div class="stage__line"></div>
+    <div class="stage__playhead"></div>
+    <div class="stage__content" id="content"></div>
+  </div>
 
-    <div class="legend" id="legend"></div>
+  <footer class="date-bar">
+    <div class="date-bar__date" id="dateBarDate">&nbsp;</div>
+    <button class="add-fab" id="addFab" type="button"><span class="add-fab__icon">+</span> Add</button>
+  </footer>
 
-    <div class="timeline" id="timeline">
-      <div class="timeline__line"></div>
-      <div class="timeline__line-fill" id="lineFill"></div>
-      <div class="timeline__nodes" id="nodes"></div>
+  <div class="add-panel" id="addPanel" hidden>
+    <div class="add-panel__inner">
+      <div class="add-panel__head">
+        <strong>Add an event</strong>
+        <button type="button" class="add-panel__close" data-action="close-add" aria-label="Close">&times;</button>
+      </div>
+      <form class="event-form" id="addForm" data-mode="add"></form>
     </div>
-  </main>
+  </div>
 
   <script src="js/script.js"></script>
 </body>

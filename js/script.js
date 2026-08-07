@@ -2,8 +2,9 @@
   "use strict";
 
   const STORAGE_KEY = "life-timeline-events.v1";
+  const DAY_MS = 86400000;
   const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-  const BASE_START = { year: 2023, month: 0 };
+  const BASE_START = new Date(2023, 0, 1);
 
   const CATEGORIES = {
     personal:  { label: "Personal",  color: "var(--c-personal)" },
@@ -43,15 +44,36 @@
     { id: "seed-27", date: "2026-07-19", title: "Started a new chapter", category: "milestone", emoji: "🌅", desc: "Nothing dramatic — just a quiet sense that things are shifting for the better." },
   ];
 
-  const nodesEl = document.getElementById("nodes");
-  const timelineEl = document.getElementById("timeline");
-  const lineFillEl = document.getElementById("lineFill");
+  // ---------- zoom / speed tuning ----------
+  const BASE_PX_PER_DAY = 72;   // idle / slow scroll — full day-level detail
+  const MIN_PX_PER_DAY = 2;     // fast scroll — compressed, years fly by
+  const DAY_TICK_MIN_PXPERDAY = 14;
+  const DAY_NUMBER_MIN_PXPERDAY = 26;
+  const SPEED_DECAY = 0.88;
+
+  // ---------- DOM refs ----------
+  const stageEl = document.getElementById("stage");
+  const contentEl = document.getElementById("content");
+  const dateBarDateEl = document.getElementById("dateBarDate");
+  const addFabEl = document.getElementById("addFab");
+  const addPanelEl = document.getElementById("addPanel");
+  const addFormEl = document.getElementById("addForm");
   const progressFillEl = document.getElementById("progressFill");
 
+  // ---------- state ----------
   let events = loadEvents();
   const openIds = new Set();
-  let firstRender = true;
-  let revealObserver = null;
+  let range = { minIdx: 0, maxIdx: 0, todayIdx: 0 };
+  let dayNodes = [];
+  const dayEls = new Map();
+  const eventEls = new Map();
+  let cursorIdx = 0;
+  let smoothedSpeed = 0;
+  let lastWheelTime = 0;
+  let dayTicksVisible = null;
+  let stageW = 0, stageH = 0, playheadY = 0, isMobile = false, lineOffsetX = 0;
+  let decayLoopRunning = false;
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   // ---------- persistence ----------
   function loadEvents() {
@@ -61,87 +83,106 @@
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed) && parsed.length) return parsed;
       }
-    } catch (e) { /* fall through to defaults */ }
+    } catch (e) { /* fall through */ }
     return DEFAULT_EVENTS.map(e => ({ ...e }));
   }
-  function saveEvents() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(events));
-  }
-  function genId() {
-    return "evt-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7);
-  }
+  function saveEvents() { localStorage.setItem(STORAGE_KEY, JSON.stringify(events)); }
+  function genId() { return "evt-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7); }
 
   // ---------- helpers ----------
   function esc(str) {
-    return String(str)
-      .replace(/&/g, "&amp;")
-      .replace(/"/g, "&quot;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
+    return String(str).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
-  function formatDate(dateStr) {
-    const d = new Date(dateStr + "T00:00:00");
-    return `${MONTH_NAMES[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+  function startOfDay(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; }
+  function dayIndexOf(date) { return Math.round((startOfDay(date) - BASE_START) / DAY_MS); }
+  function dateFromDayIndex(idx) { return new Date(BASE_START.getTime() + idx * DAY_MS); }
+  function isoDate(d) {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   }
+  function formatFullDate(d) {
+    return d.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+  }
+
+  // ---------- range + static day list ----------
   function getRange() {
-    const today = new Date();
-    let minY = BASE_START.year, minM = BASE_START.month;
-    let maxY = today.getFullYear(), maxM = today.getMonth();
+    const today = startOfDay(new Date());
+    let minIdx = 0;
+    let maxIdx = dayIndexOf(today);
     events.forEach(ev => {
-      const d = new Date(ev.date + "T00:00:00");
-      const y = d.getFullYear(), m = d.getMonth();
-      if (y < minY || (y === minY && m < minM)) { minY = y; minM = m; }
-      if (y > maxY || (y === maxY && m > maxM)) { maxY = y; maxM = m; }
+      const idx = dayIndexOf(new Date(ev.date + "T00:00:00"));
+      if (idx < minIdx) minIdx = idx;
+      if (idx > maxIdx) maxIdx = idx;
     });
-    return { minY, minM, maxY, maxM, todayY: today.getFullYear(), todayM: today.getMonth() };
+    return { minIdx, maxIdx, todayIdx: dayIndexOf(today) };
   }
 
-  // ---------- build node sequence (newest first) ----------
-  function buildNodes() {
-    const { minY, minM, maxY, maxM } = getRange();
-    const eventsByKey = {};
-    events.forEach(ev => {
-      const d = new Date(ev.date + "T00:00:00");
-      const key = `${d.getFullYear()}-${d.getMonth()}`;
-      (eventsByKey[key] = eventsByKey[key] || []).push({ ...ev, day: d.getDate() });
-    });
-    Object.values(eventsByKey).forEach(list => list.sort((a, b) => b.day - a.day));
+  function rebuildStatic() {
+    // clear old day elements
+    dayEls.forEach(el => el.remove());
+    dayEls.clear();
+    dayTicksVisible = null;
 
-    const nodes = [{ type: "add" }, { type: "today" }];
-    let sideToggle = 0;
-
-    for (let year = maxY; year >= minY; year--) {
-      nodes.push({ type: "year", year });
-      const first = year === maxY ? maxM : 11;
-      const last = year === minY ? minM : 0;
-      for (let month = first; month >= last; month--) {
-        nodes.push({ type: "month", year, month });
-        const key = `${year}-${month}`;
-        (eventsByKey[key] || []).forEach(ev => {
-          nodes.push({ type: "event", event: ev, side: sideToggle % 2 === 0 ? "left" : "right" });
-          sideToggle++;
-        });
-      }
+    range = getRange();
+    dayNodes = [];
+    for (let idx = range.minIdx; idx <= range.maxIdx; idx++) {
+      const d = dateFromDayIndex(idx);
+      dayNodes.push({
+        dayIdx: idx,
+        date: d,
+        isToday: idx === range.todayIdx,
+        isYearStart: d.getMonth() === 0 && d.getDate() === 1,
+        isMonthStart: d.getDate() === 1,
+      });
     }
-    return nodes;
+    dayNodes.forEach(buildDayElement);
   }
 
-  // ---------- markup ----------
+  function eventsByDayIndex() {
+    const map = {};
+    events.forEach(ev => {
+      const idx = dayIndexOf(new Date(ev.date + "T00:00:00"));
+      (map[idx] = map[idx] || []).push(ev);
+    });
+    return map;
+  }
+
+  // ---------- element builders ----------
+  function buildDayElement(node) {
+    const el = document.createElement("div");
+    el.className = "t-item";
+    if (node.isToday) {
+      el.classList.add("t-today");
+      el.innerHTML = `<div class="node__marker"></div><div class="node__label">Today</div>`;
+    } else if (node.isYearStart) {
+      el.classList.add("t-year");
+      el.innerHTML = `<div class="node__marker"></div><div class="node__label">${node.date.getFullYear()}</div>`;
+    } else if (node.isMonthStart) {
+      el.classList.add("t-month");
+      el.innerHTML = `<div class="node__marker"></div><div class="node__label">${MONTH_NAMES[node.date.getMonth()]}</div>`;
+    } else {
+      el.classList.add("t-day");
+      el.innerHTML = `<div class="node__marker"></div><div class="node__label">${node.date.getDate()}</div>`;
+    }
+    contentEl.appendChild(el);
+    dayEls.set(node.dayIdx, el);
+    return el;
+  }
+
   function categoryOptions(selected) {
     return Object.entries(CATEGORIES).map(([key, cat]) =>
       `<option value="${key}" ${key === selected ? "selected" : ""}>${cat.label}</option>`
     ).join("");
   }
 
-  function formFields(ev) {
-    const v = ev || { date: new Date().toISOString().slice(0, 10), emoji: "📌", category: "personal", title: "", desc: "" };
+  function formFields(v) {
     return `
       <div class="event-form__row">
         <div class="field">
           <label>Date</label>
           <input type="date" name="date" required value="${esc(v.date)}" />
         </div>
-        <div class="field field--emoji" style="max-width:80px">
+        <div class="field field--emoji" style="max-width:76px">
           <label>Icon</label>
           <input type="text" name="emoji" maxlength="4" value="${esc(v.emoji)}" />
         </div>
@@ -160,14 +201,13 @@
       </div>`;
   }
 
-  function eventPanelBody(ev, cat) {
+  function eventViewBody(ev, cat) {
     return `
       <div class="event-card__panel-body">
         <span class="event-card__cat">${cat.label}</span>
         <p class="event-card__desc">${ev.desc ? esc(ev.desc) : "No notes yet."}</p>
         <div class="event-card__actions">
           <button type="button" class="btn" data-action="edit">Edit</button>
-          <button type="button" class="btn btn--danger" data-action="delete">Delete</button>
         </div>
       </div>`;
   }
@@ -180,119 +220,52 @@
           <div class="event-form__actions">
             <button type="submit" class="btn btn--primary">Save changes</button>
             <button type="button" class="btn" data-action="cancel-edit">Cancel</button>
+            <button type="button" class="btn btn--danger" data-action="delete">Delete</button>
           </div>
         </form>
       </div>`;
   }
 
-  function renderNode(node) {
-    if (node.type === "add") {
-      const open = openIds.has("__add__") ? "open" : "";
-      return `
-        <div class="node node--add" data-id="__add__">
-          <div class="node__marker">+</div>
-          <div class="event-card add-card ${open}">
-            <button class="event-card__head" type="button" data-action="toggle">
-              <span class="event-card__emoji">＋</span>
-              <div class="event-card__headtext"><span class="event-card__title">Add an event</span></div>
-              <span class="event-card__chevron">⌄</span>
-            </button>
-            <div class="event-card__panel">
-              <div class="event-card__panel-inner">
-                <div class="event-card__panel-body">
-                  <form class="event-form" data-mode="add">
-                    ${formFields(null)}
-                    <div class="event-form__actions">
-                      <button type="submit" class="btn btn--primary">Add to timeline</button>
-                      <button type="button" class="btn" data-action="cancel-add">Cancel</button>
-                    </div>
-                  </form>
-                </div>
-              </div>
-            </div>
+  function buildEventElement(ev, side) {
+    const cat = CATEGORIES[ev.category] || CATEGORIES.personal;
+    const el = document.createElement("div");
+    el.className = `t-item t-event side-${side}`;
+    el.dataset.id = ev.id;
+    el.innerHTML = `
+      <div class="node__marker" style="--cat-color:${cat.color}"></div>
+      <div class="event-card" style="--cat-color:${cat.color}">
+        <button class="event-card__head" type="button" data-action="toggle">
+          <span class="event-card__emoji">${esc(ev.emoji || "📌")}</span>
+          <div class="event-card__headtext">
+            <span class="event-card__date">${formatFullDate(new Date(ev.date + "T00:00:00")).replace(/^\w+,\s/, "")}</span>
+            <span class="event-card__title">${esc(ev.title)}</span>
           </div>
-        </div>`;
-    }
-    if (node.type === "year") {
-      return `
-        <div class="node node--year">
-          <div class="node__marker"></div>
-          <div class="node__label">${node.year}</div>
-        </div>`;
-    }
-    if (node.type === "month") {
-      return `
-        <div class="node node--month">
-          <div class="node__marker"></div>
-          <div class="node__label">${MONTH_NAMES[node.month]}</div>
-        </div>`;
-    }
-    if (node.type === "today") {
-      return `
-        <div class="node node--today">
-          <div class="node__marker"></div>
-          <div class="node__label">Today</div>
-        </div>`;
-    }
-    if (node.type === "event") {
-      const ev = node.event;
-      const cat = CATEGORIES[ev.category] || CATEGORIES.personal;
-      const open = openIds.has(ev.id);
-      return `
-        <div class="node node--event side-${node.side}" data-id="${esc(ev.id)}">
-          <div class="node__marker" style="--cat-color:${cat.color}"></div>
-          <div class="event-card side-${node.side} ${open ? "open" : ""}" style="--cat-color:${cat.color}">
-            <button class="event-card__head" type="button" data-action="toggle">
-              <span class="event-card__emoji">${esc(ev.emoji || "📌")}</span>
-              <div class="event-card__headtext">
-                <span class="event-card__date">${formatDate(ev.date)}</span>
-                <span class="event-card__title">${esc(ev.title)}</span>
-              </div>
-              <span class="event-card__chevron">⌄</span>
-            </button>
-            <div class="event-card__panel">
-              <div class="event-card__panel-inner" data-panel="${esc(ev.id)}">
-                ${eventPanelBody(ev, cat)}
-              </div>
-            </div>
+          <span class="event-card__chevron">⌄</span>
+        </button>
+        <div class="event-card__panel">
+          <div class="event-card__panel-inner" data-panel="${esc(ev.id)}">
+            ${eventViewBody(ev, cat)}
           </div>
-        </div>`;
-    }
-    return "";
+        </div>
+      </div>`;
+    contentEl.appendChild(el);
+    eventEls.set(ev.id, el);
+    return el;
+  }
+
+  function rebuildEvents() {
+    eventEls.forEach(el => el.remove());
+    eventEls.clear();
+    events
+      .slice()
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .forEach((ev, i) => buildEventElement(ev, i % 2 === 0 ? "left" : "right"));
   }
 
   function renderLegend() {
     document.getElementById("legend").innerHTML = Object.entries(CATEGORIES).map(([key, cat]) => `
-      <div class="legend__item">
-        <span class="legend__dot" style="background:${cat.color}"></span>
-        <span>${cat.label}</span>
-      </div>
+      <div class="legend__item"><span class="legend__dot" style="background:${cat.color}"></span><span>${cat.label}</span></div>
     `).join("");
-  }
-
-  // ---------- render ----------
-  function render(focusId) {
-    nodesEl.innerHTML = buildNodes().map(renderNode).join("");
-
-    if (firstRender) {
-      setupScrollReveal();
-      firstRender = false;
-    } else {
-      nodesEl.querySelectorAll(".event-card, .node--year .node__label, .node--month .node__label")
-        .forEach(el => el.classList.add("in-view"));
-      if (revealObserver) {
-        nodesEl.querySelectorAll(".event-card, .node--year .node__label, .node--month .node__label")
-          .forEach(el => revealObserver.unobserve(el));
-      }
-    }
-
-    refreshParallaxTargets();
-    updateScrollEffects();
-
-    if (focusId) {
-      const target = nodesEl.querySelector(`[data-id="${CSS.escape(focusId)}"]`);
-      if (target) target.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
   }
 
   // ---------- CRUD ----------
@@ -300,85 +273,88 @@
     const id = genId();
     events.push({ id, ...data });
     saveEvents();
-    openIds.delete("__add__");
+    const idx = dayIndexOf(new Date(data.date + "T00:00:00"));
+    const rangeChanged = idx < range.minIdx || idx > range.maxIdx;
+    if (rangeChanged) rebuildStatic();
+    rebuildEvents();
+    closeAddPanel();
+    cursorIdx = clamp(idx, range.minIdx, range.maxIdx);
     openIds.add(id);
-    render(id);
+    const el = eventEls.get(id);
+    if (el) el.querySelector(".event-card").classList.add("open");
+    render();
   }
   function updateEvent(id, data) {
-    const idx = events.findIndex(e => e.id === id);
-    if (idx === -1) return;
-    events[idx] = { ...events[idx], ...data };
+    const idx2 = events.findIndex(e => e.id === id);
+    if (idx2 === -1) return;
+    events[idx2] = { ...events[idx2], ...data };
     saveEvents();
-    render(id);
+    const dIdx = dayIndexOf(new Date(data.date + "T00:00:00"));
+    const rangeChanged = dIdx < range.minIdx || dIdx > range.maxIdx;
+    if (rangeChanged) rebuildStatic();
+    rebuildEvents();
+    const el = eventEls.get(id);
+    if (el) el.querySelector(".event-card").classList.add("open");
+    render();
   }
   function deleteEvent(id) {
     events = events.filter(e => e.id !== id);
     openIds.delete(id);
     saveEvents();
+    rebuildEvents();
     render();
   }
 
-  // ---------- interaction ----------
+  // ---------- interaction: view/edit/delete ----------
   function toggleOpen(id) {
-    const card = nodesEl.querySelector(`[data-id="${CSS.escape(id)}"] .event-card`);
-    if (!card) return;
+    const el = eventEls.get(id);
+    if (!el) return;
+    const card = el.querySelector(".event-card");
     const isOpen = card.classList.toggle("open");
     if (isOpen) openIds.add(id); else openIds.delete(id);
   }
-
   function enterEdit(id) {
     const ev = events.find(e => e.id === id);
     if (!ev) return;
-    const panel = nodesEl.querySelector(`.event-card__panel-inner[data-panel="${CSS.escape(id)}"]`);
-    if (!panel) return;
-    panel.innerHTML = eventEditBody(ev);
+    const el = eventEls.get(id);
+    if (!el) return;
+    el.querySelector(".event-card__panel-inner").innerHTML = eventEditBody(ev);
+    el.querySelector(".event-card").classList.add("open");
     openIds.add(id);
-    const card = panel.closest(".event-card");
-    if (card) card.classList.add("open");
   }
-
   function exitEdit(id) {
     const ev = events.find(e => e.id === id);
     if (!ev) return;
     const cat = CATEGORIES[ev.category] || CATEGORIES.personal;
-    const panel = nodesEl.querySelector(`.event-card__panel-inner[data-panel="${CSS.escape(id)}"]`);
-    if (panel) panel.innerHTML = eventPanelBody(ev, cat);
+    const el = eventEls.get(id);
+    if (!el) return;
+    el.querySelector(".event-card__panel-inner").innerHTML = eventViewBody(ev, cat);
   }
-
   function handleDeleteClick(id, btn) {
-    if (btn.dataset.armed === "1") {
-      deleteEvent(id);
-      return;
-    }
+    if (btn.dataset.armed === "1") { deleteEvent(id); return; }
     btn.dataset.armed = "1";
     btn.textContent = "Confirm delete?";
     btn.classList.add("is-armed");
     setTimeout(() => {
-      if (btn.isConnected) {
-        btn.dataset.armed = "";
-        btn.textContent = "Delete";
-        btn.classList.remove("is-armed");
-      }
+      if (btn.isConnected) { btn.dataset.armed = ""; btn.textContent = "Delete"; btn.classList.remove("is-armed"); }
     }, 3000);
   }
 
-  nodesEl.addEventListener("click", e => {
+  contentEl.addEventListener("click", e => {
     const actionEl = e.target.closest("[data-action]");
     if (!actionEl) return;
+    const wrap = actionEl.closest("[data-id]");
+    const id = wrap ? wrap.dataset.id : null;
     const action = actionEl.dataset.action;
-    const nodeEl = actionEl.closest("[data-id]");
-    const id = nodeEl ? nodeEl.dataset.id : null;
-
     if (action === "toggle") toggleOpen(id);
     else if (action === "edit") enterEdit(id);
     else if (action === "cancel-edit") exitEdit(id);
-    else if (action === "cancel-add") { openIds.delete("__add__"); render(); }
     else if (action === "delete") handleDeleteClick(id, actionEl);
   });
 
-  nodesEl.addEventListener("submit", e => {
+  contentEl.addEventListener("submit", e => {
     const form = e.target.closest(".event-form");
-    if (!form) return;
+    if (!form || form.dataset.mode !== "edit") return;
     e.preventDefault();
     const fd = new FormData(form);
     const data = {
@@ -389,68 +365,212 @@
       desc: (fd.get("desc") || "").trim(),
     };
     if (!data.title || !data.date) return;
-
-    if (form.dataset.mode === "add") addEvent(data);
-    else updateEvent(form.dataset.id, data);
+    updateEvent(form.dataset.id, data);
   });
 
-  // ---------- scroll reveal (first render only) ----------
-  function setupScrollReveal() {
-    const targets = nodesEl.querySelectorAll(".event-card, .node--month .node__label, .node--year .node__label");
-    revealObserver = new IntersectionObserver((entries) => {
-      entries.forEach(entry => {
-        if (entry.isIntersecting) {
-          entry.target.classList.add("in-view");
-          revealObserver.unobserve(entry.target);
-        }
+  // ---------- add panel ----------
+  function openAddPanel() {
+    const d = dateFromDayIndex(Math.round(cursorIdx));
+    addFormEl.innerHTML = `
+      ${formFields({ date: isoDate(d), emoji: "📌", category: "personal", title: "", desc: "" })}
+      <div class="event-form__actions">
+        <button type="submit" class="btn btn--primary">Add to timeline</button>
+        <button type="button" class="btn" data-action="close-add">Cancel</button>
+      </div>`;
+    addPanelEl.hidden = false;
+    requestAnimationFrame(() => addPanelEl.classList.add("open"));
+    const titleInput = addFormEl.querySelector('input[name="title"]');
+    if (titleInput) titleInput.focus();
+  }
+  function closeAddPanel() {
+    addPanelEl.classList.remove("open");
+    setTimeout(() => { addPanelEl.hidden = true; }, 250);
+  }
+
+  addFabEl.addEventListener("click", () => {
+    if (addPanelEl.classList.contains("open")) closeAddPanel();
+    else openAddPanel();
+  });
+  addPanelEl.addEventListener("click", e => {
+    if (e.target.closest('[data-action="close-add"]')) closeAddPanel();
+  });
+  addFormEl.addEventListener("submit", e => {
+    e.preventDefault();
+    const fd = new FormData(addFormEl);
+    const data = {
+      date: fd.get("date"),
+      emoji: (fd.get("emoji") || "").trim() || "📌",
+      title: (fd.get("title") || "").trim(),
+      category: fd.get("category"),
+      desc: (fd.get("desc") || "").trim(),
+    };
+    if (!data.title || !data.date) return;
+    addEvent(data);
+  });
+
+  // ---------- geometry ----------
+  function measure() {
+    const r = stageEl.getBoundingClientRect();
+    stageW = r.width;
+    stageH = r.height;
+    playheadY = stageH * 0.44;
+    isMobile = window.innerWidth <= 720;
+    lineOffsetX = isMobile ? 26 : stageW / 2;
+  }
+
+  // ---------- zoom ----------
+  function zoomFactor(speed) {
+    const t = clamp(speed / 46, 0, 1);
+    return Math.pow(t, 0.55);
+  }
+  function currentPxPerDay() {
+    if (reducedMotion) return BASE_PX_PER_DAY;
+    const z = zoomFactor(smoothedSpeed);
+    return BASE_PX_PER_DAY + (MIN_PX_PER_DAY - BASE_PX_PER_DAY) * z;
+  }
+
+  // ---------- render (per frame) ----------
+  function render() {
+    const pxPerDay = currentPxPerDay();
+
+    // years / months / today — always update (small count)
+    dayNodes.forEach(node => {
+      if (!node.isYearStart && !node.isMonthStart && !node.isToday) return;
+      const el = dayEls.get(node.dayIdx);
+      if (!el) return;
+      const y = playheadY + (cursorIdx - node.dayIdx) * pxPerDay;
+      el.style.transform = `translate(-50%, ${y.toFixed(1)}px)`;
+    });
+
+    // day ticks — gated by zoom level
+    const showDays = pxPerDay >= DAY_TICK_MIN_PXPERDAY;
+    if (showDays !== dayTicksVisible) {
+      dayNodes.forEach(node => {
+        if (node.isYearStart || node.isMonthStart || node.isToday) return;
+        const el = dayEls.get(node.dayIdx);
+        if (el) el.style.display = showDays ? "block" : "none";
       });
-    }, { threshold: 0.15, rootMargin: "0px 0px -8% 0px" });
-    targets.forEach(t => revealObserver.observe(t));
-  }
+      dayTicksVisible = showDays;
+    }
+    if (showDays) {
+      const showNumbers = pxPerDay >= DAY_NUMBER_MIN_PXPERDAY;
+      dayNodes.forEach(node => {
+        if (node.isYearStart || node.isMonthStart || node.isToday) return;
+        const el = dayEls.get(node.dayIdx);
+        if (!el) return;
+        const y = playheadY + (cursorIdx - node.dayIdx) * pxPerDay;
+        el.style.transform = `translate(-50%, ${y.toFixed(1)}px)`;
+        el.classList.toggle("show-number", showNumbers);
+      });
+    }
 
-  // ---------- scroll progress + parallax ----------
-  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  let parallaxTargets = [];
-  let ticking = false;
+    // events
+    eventEls.forEach((el, id) => {
+      const ev = events.find(e => e.id === id);
+      if (!ev) return;
+      const idx = dayIndexOf(new Date(ev.date + "T00:00:00"));
+      const y = playheadY + (cursorIdx - idx) * pxPerDay;
+      el.style.transform = `translate(-50%, ${y.toFixed(1)}px)`;
+      const dist = Math.abs(y - playheadY);
+      const fade = clamp(1 - dist / (stageH * 0.62), 0.12, 1);
+      el.style.opacity = fade.toFixed(2);
+    });
 
-  function refreshParallaxTargets() {
-    parallaxTargets = Array.from(nodesEl.querySelectorAll(".node--event"));
-  }
-
-  function updateScrollEffects() {
-    ticking = false;
-    const rect = timelineEl.getBoundingClientRect();
-    const viewportH = window.innerHeight;
-    const viewportMid = viewportH * 0.5;
-    const total = rect.height;
-    const filled = Math.min(Math.max(viewportMid - rect.top, 0), total);
-    const pct = total > 0 ? (filled / total) * 100 : 0;
-    lineFillEl.style.height = pct + "%";
+    // date bar + progress
+    const cursorDate = dateFromDayIndex(Math.round(cursorIdx));
+    dateBarDateEl.textContent = formatFullDate(cursorDate);
+    const span = range.maxIdx - range.minIdx || 1;
+    const pct = clamp(((range.maxIdx - cursorIdx) / span) * 100, 0, 100);
     progressFillEl.style.width = pct + "%";
-
-    if (!reducedMotion) {
-      parallaxTargets.forEach(el => {
-        const r = el.getBoundingClientRect();
-        const cardMid = r.top + r.height / 2;
-        const dist = viewportMid - cardMid;
-        const offset = Math.max(-16, Math.min(16, dist * 0.06));
-        el.style.transform = `translateY(${offset.toFixed(1)}px)`;
-      });
-    }
   }
 
-  function onScroll() {
-    if (!ticking) {
-      ticking = true;
-      requestAnimationFrame(updateScrollEffects);
-    }
+  // ---------- input: wheel / touch / keyboard ----------
+  function normalizeDeltaY(e) {
+    let d = e.deltaY;
+    if (e.deltaMode === 1) d *= 18;
+    else if (e.deltaMode === 2) d *= stageH || window.innerHeight;
+    return d;
   }
 
-  window.addEventListener("scroll", onScroll, { passive: true });
-  window.addEventListener("resize", onScroll);
+  function applyDelta(deltaPx, dtMs) {
+    const dt = Math.max(1, dtMs);
+    const instSpeed = (Math.abs(deltaPx) / dt) * 16;
+    smoothedSpeed = instSpeed;
+    const pxPerDay = currentPxPerDay();
+    const daysDelta = deltaPx / pxPerDay;
+    // scrolling down (positive delta) moves toward the past (smaller day index)
+    cursorIdx = clamp(cursorIdx - daysDelta, range.minIdx, range.maxIdx);
+    render();
+    startDecayLoop();
+  }
+
+  function startDecayLoop() {
+    if (decayLoopRunning) return;
+    decayLoopRunning = true;
+    function tick() {
+      smoothedSpeed *= SPEED_DECAY;
+      if (smoothedSpeed < 0.4) {
+        smoothedSpeed = 0;
+        render();
+        decayLoopRunning = false;
+        return;
+      }
+      render();
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }
+
+  stageEl.addEventListener("wheel", e => {
+    e.preventDefault();
+    const now = performance.now();
+    const dt = now - (lastWheelTime || now - 16);
+    lastWheelTime = now;
+    applyDelta(normalizeDeltaY(e), dt);
+  }, { passive: false });
+
+  let touchLastY = null;
+  let touchLastTime = 0;
+  stageEl.addEventListener("touchstart", e => {
+    touchLastY = e.touches[0].clientY;
+    touchLastTime = performance.now();
+  }, { passive: true });
+  stageEl.addEventListener("touchmove", e => {
+    e.preventDefault();
+    const y = e.touches[0].clientY;
+    const now = performance.now();
+    if (touchLastY !== null) {
+      const delta = touchLastY - y;
+      applyDelta(delta, now - touchLastTime);
+    }
+    touchLastY = y;
+    touchLastTime = now;
+  }, { passive: false });
+  stageEl.addEventListener("touchend", () => { touchLastY = null; });
+
+  stageEl.addEventListener("keydown", e => {
+    let days = 0;
+    if (e.key === "ArrowDown") days = -1;
+    else if (e.key === "ArrowUp") days = 1;
+    else if (e.key === "PageDown") days = -30;
+    else if (e.key === "PageUp") days = 30;
+    else if (e.key === "Home") { cursorIdx = range.maxIdx; render(); e.preventDefault(); return; }
+    else if (e.key === "End") { cursorIdx = range.minIdx; render(); e.preventDefault(); return; }
+    if (days !== 0) {
+      e.preventDefault();
+      cursorIdx = clamp(cursorIdx + days, range.minIdx, range.maxIdx);
+      smoothedSpeed = 0;
+      render();
+    }
+  });
+
+  window.addEventListener("resize", () => { measure(); render(); });
 
   // ---------- init ----------
   renderLegend();
+  rebuildStatic();
+  rebuildEvents();
+  cursorIdx = range.maxIdx;
+  measure();
   render();
-  updateScrollEffects();
 })();
