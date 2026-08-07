@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="color-scheme" content="light" />
 <title>My Life Timeline</title>
 <link rel="stylesheet" href="css/style.css" />
 </head>
@@ -11,15 +12,15 @@
   <header class="site-header">
     <div class="site-header__inner">
       <span class="site-header__title">🗓️ My Life Timeline</span>
-      <span class="site-header__hint">scroll to explore &middot; click a card for details</span>
+      <span class="site-header__hint">today at the top &middot; click an entry to expand &middot; add your own below</span>
     </div>
     <div class="progress-bar"><div class="progress-bar__fill" id="progressFill"></div></div>
   </header>
 
   <main>
     <section class="intro">
-      <h1>Every month, since 2023.</h1>
-      <p>A vertical timeline of the years and months that have passed &mdash; with a few placeholder moments dropped in along the way. Click any card to read more.</p>
+      <h1>Working backward from today.</h1>
+      <p>Every month since January 2023, newest first. Click any entry to read more, edit it, or remove it &mdash; and drop in moments of your own as you go.</p>
     </section>
 
     <div class="legend" id="legend"></div>
@@ -30,16 +31,6 @@
       <div class="timeline__nodes" id="nodes"></div>
     </div>
   </main>
-
-  <div class="modal-overlay" id="modalOverlay">
-    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
-      <button class="modal__close" id="modalClose" aria-label="Close">&times;</button>
-      <div class="modal__badge" id="modalCategory"></div>
-      <h2 class="modal__title" id="modalTitle"></h2>
-      <div class="modal__date" id="modalDate"></div>
-      <p class="modal__desc" id="modalDesc"></p>
-    </div>
-  </div>
 
   <script src="js/script.js"></script>
 </body>
