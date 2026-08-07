@@ -44,12 +44,9 @@
     { id: "seed-27", date: "2026-07-19", title: "Started a new chapter", category: "milestone", emoji: "🌅", desc: "Nothing dramatic — just a quiet sense that things are shifting for the better." },
   ];
 
-  // ---------- zoom / speed tuning ----------
-  const BASE_PX_PER_DAY = 72;   // idle / slow scroll — full day-level detail
-  const MIN_PX_PER_DAY = 2;     // fast scroll — compressed, years fly by
-  const DAY_TICK_MIN_PXPERDAY = 14;
-  const DAY_NUMBER_MIN_PXPERDAY = 26;
-  const SPEED_DECAY = 0.88;
+  // ---------- scale ----------
+  // fixed day spacing — no speed-based zoom, just a constant, tight scale
+  const PX_PER_DAY = 3.6;
 
   // ---------- DOM refs ----------
   const stageEl = document.getElementById("stage");
@@ -68,12 +65,7 @@
   const dayEls = new Map();
   const eventEls = new Map();
   let cursorIdx = 0;
-  let smoothedSpeed = 0;
-  let lastWheelTime = 0;
-  let dayTicksVisible = null;
   let stageW = 0, stageH = 0, playheadY = 0, isMobile = false, lineOffsetX = 0;
-  let decayLoopRunning = false;
-  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   // ---------- persistence ----------
   function loadEvents() {
@@ -121,7 +113,6 @@
     // clear old day elements
     dayEls.forEach(el => el.remove());
     dayEls.clear();
-    dayTicksVisible = null;
 
     range = getRange();
     dayNodes = [];
@@ -162,7 +153,7 @@
       el.innerHTML = `<div class="node__marker"></div><div class="node__label">${MONTH_NAMES[node.date.getMonth()]}</div>`;
     } else {
       el.classList.add("t-day");
-      el.innerHTML = `<div class="node__marker"></div><div class="node__label">${node.date.getDate()}</div>`;
+      el.innerHTML = `<div class="node__marker"></div>`;
     }
     contentEl.appendChild(el);
     dayEls.set(node.dayIdx, el);
@@ -418,61 +409,23 @@
     lineOffsetX = isMobile ? 26 : stageW / 2;
   }
 
-  // ---------- zoom ----------
-  function zoomFactor(speed) {
-    const t = clamp(speed / 46, 0, 1);
-    return Math.pow(t, 0.55);
-  }
-  function currentPxPerDay() {
-    if (reducedMotion) return BASE_PX_PER_DAY;
-    const z = zoomFactor(smoothedSpeed);
-    return BASE_PX_PER_DAY + (MIN_PX_PER_DAY - BASE_PX_PER_DAY) * z;
-  }
-
   // ---------- render (per frame) ----------
   function render() {
-    const pxPerDay = currentPxPerDay();
-
-    // years / months / today — always update (small count)
     dayNodes.forEach(node => {
-      if (!node.isYearStart && !node.isMonthStart && !node.isToday) return;
       const el = dayEls.get(node.dayIdx);
       if (!el) return;
-      const y = playheadY + (cursorIdx - node.dayIdx) * pxPerDay;
+      const y = playheadY + (cursorIdx - node.dayIdx) * PX_PER_DAY;
       el.style.transform = `translate(-50%, ${y.toFixed(1)}px)`;
     });
 
-    // day ticks — gated by zoom level
-    const showDays = pxPerDay >= DAY_TICK_MIN_PXPERDAY;
-    if (showDays !== dayTicksVisible) {
-      dayNodes.forEach(node => {
-        if (node.isYearStart || node.isMonthStart || node.isToday) return;
-        const el = dayEls.get(node.dayIdx);
-        if (el) el.style.display = showDays ? "block" : "none";
-      });
-      dayTicksVisible = showDays;
-    }
-    if (showDays) {
-      const showNumbers = pxPerDay >= DAY_NUMBER_MIN_PXPERDAY;
-      dayNodes.forEach(node => {
-        if (node.isYearStart || node.isMonthStart || node.isToday) return;
-        const el = dayEls.get(node.dayIdx);
-        if (!el) return;
-        const y = playheadY + (cursorIdx - node.dayIdx) * pxPerDay;
-        el.style.transform = `translate(-50%, ${y.toFixed(1)}px)`;
-        el.classList.toggle("show-number", showNumbers);
-      });
-    }
-
-    // events
     eventEls.forEach((el, id) => {
       const ev = events.find(e => e.id === id);
       if (!ev) return;
       const idx = dayIndexOf(new Date(ev.date + "T00:00:00"));
-      const y = playheadY + (cursorIdx - idx) * pxPerDay;
+      const y = playheadY + (cursorIdx - idx) * PX_PER_DAY;
       el.style.transform = `translate(-50%, ${y.toFixed(1)}px)`;
       const dist = Math.abs(y - playheadY);
-      const fade = clamp(1 - dist / (stageH * 0.62), 0.12, 1);
+      const fade = clamp(1 - dist / (stageH * 1.1), 0.4, 1);
       el.style.opacity = fade.toFixed(2);
     });
 
@@ -492,59 +445,27 @@
     return d;
   }
 
-  function applyDelta(deltaPx, dtMs) {
-    const dt = Math.max(1, dtMs);
-    const instSpeed = (Math.abs(deltaPx) / dt) * 16;
-    smoothedSpeed = instSpeed;
-    const pxPerDay = currentPxPerDay();
-    const daysDelta = deltaPx / pxPerDay;
+  function applyDelta(deltaPx) {
+    const daysDelta = deltaPx / PX_PER_DAY;
     // scrolling down (positive delta) moves toward the past (smaller day index)
     cursorIdx = clamp(cursorIdx - daysDelta, range.minIdx, range.maxIdx);
     render();
-    startDecayLoop();
-  }
-
-  function startDecayLoop() {
-    if (decayLoopRunning) return;
-    decayLoopRunning = true;
-    function tick() {
-      smoothedSpeed *= SPEED_DECAY;
-      if (smoothedSpeed < 0.4) {
-        smoothedSpeed = 0;
-        render();
-        decayLoopRunning = false;
-        return;
-      }
-      render();
-      requestAnimationFrame(tick);
-    }
-    requestAnimationFrame(tick);
   }
 
   stageEl.addEventListener("wheel", e => {
     e.preventDefault();
-    const now = performance.now();
-    const dt = now - (lastWheelTime || now - 16);
-    lastWheelTime = now;
-    applyDelta(normalizeDeltaY(e), dt);
+    applyDelta(normalizeDeltaY(e));
   }, { passive: false });
 
   let touchLastY = null;
-  let touchLastTime = 0;
   stageEl.addEventListener("touchstart", e => {
     touchLastY = e.touches[0].clientY;
-    touchLastTime = performance.now();
   }, { passive: true });
   stageEl.addEventListener("touchmove", e => {
     e.preventDefault();
     const y = e.touches[0].clientY;
-    const now = performance.now();
-    if (touchLastY !== null) {
-      const delta = touchLastY - y;
-      applyDelta(delta, now - touchLastTime);
-    }
+    if (touchLastY !== null) applyDelta(touchLastY - y);
     touchLastY = y;
-    touchLastTime = now;
   }, { passive: false });
   stageEl.addEventListener("touchend", () => { touchLastY = null; });
 
@@ -559,12 +480,20 @@
     if (days !== 0) {
       e.preventDefault();
       cursorIdx = clamp(cursorIdx + days, range.minIdx, range.maxIdx);
-      smoothedSpeed = 0;
       render();
     }
   });
 
   window.addEventListener("resize", () => { measure(); render(); });
+
+  // guard against any accidental native scroll (focus-into-view, a11y tools) —
+  // positioning is entirely transform-driven, so stage scroll offset must stay 0
+  stageEl.addEventListener("scroll", () => {
+    if (stageEl.scrollTop !== 0 || stageEl.scrollLeft !== 0) {
+      stageEl.scrollTop = 0;
+      stageEl.scrollLeft = 0;
+    }
+  }, { passive: true });
 
   // ---------- init ----------
   renderLegend();
