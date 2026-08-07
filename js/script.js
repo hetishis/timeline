@@ -56,6 +56,10 @@
   const addPanelEl = document.getElementById("addPanel");
   const addFormEl = document.getElementById("addForm");
   const progressFillEl = document.getElementById("progressFill");
+  const activeYearEl = document.getElementById("activeYear");
+  const yearRailEl = document.getElementById("yearRail");
+  const yearRailMarksEl = document.getElementById("yearRailMarks");
+  const yearRailCursorEl = document.getElementById("yearRailCursor");
 
   // ---------- state ----------
   let events = loadEvents();
@@ -64,8 +68,10 @@
   let dayNodes = [];
   const dayEls = new Map();
   const eventEls = new Map();
+  let yearRailNodes = []; // { dayIdx, el }
   let cursorIdx = 0;
-  let stageW = 0, stageH = 0, playheadY = 0, isMobile = false, lineOffsetX = 0;
+  let lastActiveYear = null;
+  let stageW = 0, stageH = 0, playheadY = 0, railH = 0, isMobile = false, lineOffsetX = 0;
 
   // ---------- persistence ----------
   function loadEvents() {
@@ -127,6 +133,27 @@
       });
     }
     dayNodes.forEach(buildDayElement);
+    buildYearRail();
+  }
+
+  function buildYearRail() {
+    yearRailMarksEl.innerHTML = "";
+    yearRailNodes = [];
+    const minYear = dateFromDayIndex(range.minIdx).getFullYear();
+    const maxYear = dateFromDayIndex(range.maxIdx).getFullYear();
+    for (let y = minYear; y <= maxYear; y++) {
+      const idx = clamp(dayIndexOf(new Date(y, 0, 1)), range.minIdx, range.maxIdx);
+      const el = document.createElement("div");
+      el.className = "year-tick";
+      el.innerHTML = `<div class="year-tick__dot"></div><div class="year-tick__label">${String(y).slice(2)}</div>`;
+      yearRailMarksEl.appendChild(el);
+      yearRailNodes.push({ dayIdx: idx, el });
+    }
+    const todayEl = document.createElement("div");
+    todayEl.className = "year-tick year-tick--today";
+    todayEl.innerHTML = `<div class="year-tick__dot"></div>`;
+    yearRailMarksEl.appendChild(todayEl);
+    yearRailNodes.push({ dayIdx: range.todayIdx, el: todayEl });
   }
 
   function eventsByDayIndex() {
@@ -410,6 +437,7 @@
     playheadY = stageH * 0.44;
     isMobile = window.innerWidth <= 720;
     lineOffsetX = isMobile ? 26 : stageW / 2;
+    railH = yearRailEl.getBoundingClientRect().height;
   }
 
   // ---------- render (per frame) ----------
@@ -462,6 +490,20 @@
     const span = range.maxIdx - range.minIdx || 1;
     const pct = clamp(((range.maxIdx - cursorIdx) / span) * 100, 0, 100);
     progressFillEl.style.width = pct + "%";
+
+    // active year, fixed at the top of the screen
+    const year = cursorDate.getFullYear();
+    if (year !== lastActiveYear) {
+      activeYearEl.textContent = year;
+      lastActiveYear = year;
+    }
+
+    // year rail — zoomed-out overview, same top(newest)-to-bottom(oldest) mapping
+    yearRailNodes.forEach(({ dayIdx, el }) => {
+      const frac = (range.maxIdx - dayIdx) / span;
+      el.style.transform = `translate(-50%, ${(frac * railH).toFixed(1)}px)`;
+    });
+    yearRailCursorEl.style.transform = `translateY(${(pct / 100 * railH).toFixed(1)}px)`;
   }
 
   // keep re-rendering for a short window so the push-down amount tracks the
@@ -578,6 +620,27 @@
       render();
     }
   });
+
+  // ---------- year rail: click or drag to jump ----------
+  function railJumpTo(clientY) {
+    const r = yearRailEl.getBoundingClientRect();
+    const frac = clamp((clientY - r.top) / r.height, 0, 1);
+    const span = range.maxIdx - range.minIdx || 1;
+    cursorIdx = clamp(range.maxIdx - frac * span, range.minIdx, range.maxIdx);
+    render();
+  }
+  let railDragging = false;
+  yearRailEl.addEventListener("pointerdown", e => {
+    stopMomentum();
+    railDragging = true;
+    yearRailEl.setPointerCapture(e.pointerId);
+    railJumpTo(e.clientY);
+  });
+  yearRailEl.addEventListener("pointermove", e => {
+    if (railDragging) railJumpTo(e.clientY);
+  });
+  yearRailEl.addEventListener("pointerup", () => { railDragging = false; });
+  yearRailEl.addEventListener("pointercancel", () => { railDragging = false; });
 
   window.addEventListener("resize", () => { measure(); render(); });
 

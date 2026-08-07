@@ -34,8 +34,9 @@ body {
   --c-health: #059669;
   --c-today: #f43f5e;
 
-  --header-h: 84px;
+  --header-h: 112px;
   --bar-h: 72px;
+  --rail-w: 56px;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -72,6 +73,15 @@ body {
 }
 .legend__item { display: flex; align-items: center; gap: 5px; font-size: 0.72rem; color: var(--text-muted); }
 .legend__dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.active-year {
+  text-align: center;
+  margin-top: 4px;
+  font-size: 1.1rem;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
 .progress-bar { height: 2px; width: 100%; background: transparent; margin-top: 8px; }
 .progress-bar__fill { height: 100%; width: 0%; background: var(--accent); }
 
@@ -79,7 +89,13 @@ body {
 .stage {
   position: fixed;
   top: var(--header-h);
-  left: 0; right: 0;
+  /* reserve room for the year rail on the right by narrowing the box itself
+     (not padding — inset:0 children fill the padding box, which is NOT
+     inset by padding when there's no border, so padding alone wouldn't
+     shrink them). All absolutely positioned descendants (.stage__line,
+     .stage__playhead, .stage__content) resolve percentages against this
+     narrower box, so the centered line shifts left as a unit. */
+  left: 0; right: var(--rail-w);
   bottom: var(--bar-h);
   /* clip, not hidden: content is positioned entirely via transform and can
      span thousands of px off-screen — overflow:hidden would still let the
@@ -381,9 +397,72 @@ body {
 .add-panel__close { background: none; border: none; font-size: 1.4rem; line-height: 1; color: var(--text-muted); cursor: pointer; }
 .add-panel__close:hover { color: var(--text); }
 
+/* ---------- Year rail — zoomed-out overview to jump across years ---------- */
+.year-rail {
+  position: fixed;
+  top: var(--header-h);
+  bottom: var(--bar-h);
+  right: 0;
+  width: var(--rail-w);
+  z-index: 40;
+  cursor: pointer;
+  touch-action: none;
+}
+.year-rail__line {
+  position: absolute;
+  top: 0; bottom: 0;
+  left: 50%;
+  width: 2px;
+  background: var(--line);
+  transform: translateX(-50%);
+}
+.year-rail__marks { position: absolute; inset: 0; }
+.year-tick {
+  position: absolute;
+  top: 0; left: 50%;
+  will-change: transform;
+  pointer-events: none;
+}
+.year-tick__dot {
+  position: absolute;
+  top: 0; left: 0;
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: var(--bg-elevated);
+  border: 2px solid var(--accent);
+  transform: translate(-50%, -50%);
+}
+.year-tick__label {
+  position: absolute;
+  top: 12px;
+  left: 0;
+  transform: translateX(-50%);
+  font-size: 0.62rem;
+  font-weight: 700;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.year-tick--today .year-tick__dot {
+  width: 8px; height: 8px;
+  background: var(--c-today);
+  border-color: var(--c-today);
+}
+.year-rail__cursor {
+  position: absolute;
+  left: 4px; right: 4px;
+  top: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+  will-change: transform;
+  pointer-events: none;
+}
+
 /* ---------- Responsive ---------- */
 @media (max-width: 720px) {
-  :root { --header-h: 96px; --bar-h: 76px; }
+  :root { --header-h: 124px; --bar-h: 76px; --rail-w: 44px; }
   .stage__line { left: 26px; }
   .t-item { left: 26px; }
   .t-year .node__label,
@@ -392,7 +471,8 @@ body {
   .t-today .node__label { left: 20px; }
   .t-event.side-left .event-card,
   .t-event.side-right .event-card { left: 24px; right: auto; }
-  .event-card { width: min(320px, calc(100vw - 70px)); }
+  .event-card { width: min(320px, calc(100vw - 70px - var(--rail-w))); }
+  .year-tick__label { font-size: 0.58rem; }
   .event-form__row { flex-direction: column; }
   .date-bar__date { font-size: 0.82rem; }
 }

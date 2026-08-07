@@ -15,6 +15,7 @@
       <span class="site-header__hint">scroll to move through time, day by day</span>
     </div>
     <div class="legend" id="legend"></div>
+    <div class="active-year" id="activeYear"></div>
     <div class="progress-bar"><div class="progress-bar__fill" id="progressFill"></div></div>
   </header>
 
@@ -22,6 +23,12 @@
     <div class="stage__line"></div>
     <div class="stage__playhead"></div>
     <div class="stage__content" id="content"></div>
+  </div>
+
+  <div class="year-rail" id="yearRail" aria-label="Jump to a year">
+    <div class="year-rail__line"></div>
+    <div class="year-rail__marks" id="yearRailMarks"></div>
+    <div class="year-rail__cursor" id="yearRailCursor"></div>
   </div>
 
   <footer class="date-bar">
